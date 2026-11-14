@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pandas
+openpyxl
+scikit-learn
+pdfplumber
+reportlab
+PyJWT
+python-dotenv
+google-auth
+requests
+sqlalchemy
+bcrypt
+psycopg[binary]
