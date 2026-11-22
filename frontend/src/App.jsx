@@ -57,7 +57,7 @@ export default function App() {
   const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
 
   return token && user ? (
-    <Dashboard user={user} onLogout={logout} theme={theme} onToggleTheme={toggleTheme} />
+       <Dashboard user={user} onLogout={logout} onSession={login} theme={theme} onToggleTheme={toggleTheme} />
   ) : (
     <Login onLogin={login} />
   );

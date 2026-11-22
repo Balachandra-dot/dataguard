@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
+from auth import create_token, current_user, verify_google_token
+from db import Analysis, User, get_db
+from sqlalchemy import delete, or_, select
 from auth import create_token, verify_google_token
 from db import User, get_db
 
@@ -161,3 +163,96 @@ def google_login(body: GoogleIn, db: Session = Depends(get_db)):
         raise HTTPException(409, "This email is already registered with a password. Please sign in with your password.")
 
     return session_for(user)
+# ---------- Account / settings ----------
+
+class ProfileIn(BaseModel):
+    name: str
+
+
+class PasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class DeleteIn(BaseModel):
+    password: str | None = None
+
+
+def password_problem(pw: str) -> str | None:
+    if len(pw) < 8 or not re.search(r"[A-Za-z]", pw) or not re.search(r"\d", pw):
+        return "Password must be at least 8 characters with letters and numbers."
+    if len(pw.encode()) > 72:
+        return "Password is too long (maximum 72 bytes)."
+    return None
+
+
+def get_current(claims: dict, db: Session) -> User:
+    user_id = claims.get("id")
+    user = db.get(User, user_id) if user_id else None
+    if user is None:
+        raise HTTPException(401, "Please sign in again.")
+    return user
+
+
+@router.get("/me")
+def get_me(claims: dict = Depends(current_user), db: Session = Depends(get_db)):
+    user = get_current(claims, db)
+    return {
+        **public(user),
+        "provider": user.provider,
+        "has_password": bool(user.password_hash),
+        "created_at": user.created_at.replace(tzinfo=None).isoformat() + "Z",
+    }
+
+
+@router.patch("/profile")
+def update_profile(body: ProfileIn, claims: dict = Depends(current_user), db: Session = Depends(get_db)):
+    user = get_current(claims, db)
+    name = body.name.strip()
+    if len(name) < 2 or len(name) > 100:
+        raise HTTPException(400, "Please enter a valid name (2-100 characters).")
+    user.name = name
+    db.commit()
+    db.refresh(user)
+    return session_for(user)
+
+
+@router.post("/change-password")
+def change_password(body: PasswordIn, claims: dict = Depends(current_user), db: Session = Depends(get_db)):
+    user = get_current(claims, db)
+    if not user.password_hash:
+        raise HTTPException(400, "This account signs in with Google, so it has no password to change.")
+
+    key = f"pw:{user.id}"
+    now = time.time()
+    recent = [t for t in failed_attempts.get(key, []) if now - t < LOCK_SECONDS]
+    failed_attempts[key] = recent
+    if len(recent) >= MAX_FAILS:
+        raise HTTPException(429, "Too many failed attempts. Try again in a few minutes.")
+
+    if not check_password(body.current_password, user.password_hash):
+        failed_attempts.setdefault(key, []).append(now)
+        raise HTTPException(401, "Current password is incorrect.")
+    failed_attempts.pop(key, None)
+
+    problem = password_problem(body.new_password)
+    if problem:
+        raise HTTPException(400, problem)
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "The new password must be different from the current one.")
+
+    user.password_hash = hash_password(body.new_password)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/account")
+def delete_account(body: DeleteIn, claims: dict = Depends(current_user), db: Session = Depends(get_db)):
+    user = get_current(claims, db)
+    if user.password_hash:
+        if not body.password or not check_password(body.password, user.password_hash):
+            raise HTTPException(401, "Password is incorrect.")
+    db.execute(delete(Analysis).where(Analysis.user_id == user.id))
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
